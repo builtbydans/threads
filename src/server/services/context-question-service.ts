@@ -1,7 +1,11 @@
 import "server-only";
 
 import { AMINA_PATIENT_ID } from "@/lib/constants";
-import { getGeminiClient, getGeminiModel } from "@/server/gemini/client";
+import {
+  getGeminiClient,
+  getGeminiModel,
+  getGeminiThinkingConfig,
+} from "@/server/gemini/client";
 import {
   askThreadResponseJsonSchema,
   askThreadResponseSchema,
@@ -67,6 +71,17 @@ const matchingEvidence = (
     .slice(0, limit)
     .map(({ item }) => item);
 
+const uniqueEvidence = (items: AiEvidenceItem[]) =>
+  [...new Map(items.map((item) => [item.id, item])).values()];
+
+const evidenceMatching = (evidence: AiEvidenceItem[], expression: RegExp) =>
+  evidence.filter((item) => expression.test(searchableText(item)));
+
+const naturalList = (items: string[]) => {
+  if (items.length < 2) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+};
+
 type FallbackAnswer = {
   answer: string;
   supportLevel: AskThreadSupportLevel;
@@ -87,9 +102,15 @@ const deterministicFallback = (
       /pain/,
     ]);
     if (evidence.length) {
+      const combined = evidence.map(searchableText).join(" ");
+      const periods = [
+        /evening|18:42/.test(combined) ? "in the evening" : null,
+        /overnight|night|woke|sleep/.test(combined) ? "overnight" : null,
+      ].filter((period): period is string => Boolean(period));
       return {
-        answer:
-          "Amina reports worse pain in the evening and overnight, including pain that woke her from sleep. The recorded updates are too limited to establish a consistent daily pattern.",
+        answer: periods.length
+          ? `Amina reports worse pain ${naturalList(periods)}. The recorded updates are too limited to establish a consistent daily pattern.`
+          : "The record includes pain reports but does not establish when the pain is worst.",
         supportLevel: "partially_supported",
         missingInformation:
           "The record does not contain enough comparable morning, afternoon and evening pain ratings to establish a reliable pattern.",
@@ -99,15 +120,24 @@ const deterministicFallback = (
   }
 
   if (/naproxen.*help|help.*naproxen/i.test(lower)) {
-    const evidence = matchingEvidence(context.evidence, [
-      /naproxen.*(?:relief|edge off|help)/,
-      /nausea|sick/,
-      /avoid(?:ed)?(?: a)? dose|did not take/,
-    ]);
+    const relief = evidenceMatching(
+      context.evidence,
+      /naproxen.*(?:relief|edge off|help)|(?:relief|edge off|help).*naproxen/,
+    );
+    const nausea = evidenceMatching(context.evidence, /naproxen.*(?:nausea|sick)|(?:nausea|sick).*naproxen/);
+    const avoided = evidenceMatching(
+      context.evidence,
+      /naproxen.*(?:avoid(?:ed)?|did not take)|(?:avoid(?:ed)?|did not take).*naproxen/,
+    );
+    const evidence = uniqueEvidence([...relief, ...nausea, ...avoided]);
     if (evidence.length) {
+      const facts = [
+        relief.length ? "reported some relief after naproxen" : null,
+        nausea.length ? "later reported nausea" : null,
+        avoided.length ? "avoided a later dose" : null,
+      ].filter((fact): fact is string => Boolean(fact));
       return {
-        answer:
-          "Amina previously reported partial relief after naproxen. She later reported nausea and avoided another dose because she was concerned it would recur. The record does not establish consistent effectiveness.",
+        answer: `Amina ${naturalList(facts)}. The record does not establish consistent effectiveness.`,
         supportLevel: "partially_supported",
         missingInformation:
           "Consistent before-and-after pain ratings following naproxen were not recorded.",
@@ -117,15 +147,19 @@ const deterministicFallback = (
   }
 
   if (/daily life|affecting.*life|work|sleep|fatigue/i.test(lower)) {
-    const evidence = matchingEvidence(context.evidence, [
-      /sleep|woke|night/,
-      /fatigue|tired/,
-      /standing|work|shift|left early|confidence/,
-    ]);
+    const factMatches = [
+      { text: "interrupted sleep", items: evidenceMatching(context.evidence, /sleep|woke.*night|night.*woke/) },
+      { text: "fatigue", items: evidenceMatching(context.evidence, /fatigue|tired/) },
+      { text: "difficulty standing at work", items: evidenceMatching(context.evidence, /standing.*work|work.*standing/) },
+      { text: "leaving work early", items: evidenceMatching(context.evidence, /leave work early|left work early|left.*shift early/) },
+      { text: "being unable to go to work", items: evidenceMatching(context.evidence, /could not go to work|unable to go to work|not go to work/) },
+      { text: "reduced confidence at work", items: evidenceMatching(context.evidence, /confidence.*work|confidence.*shift/) },
+    ];
+    const supportedFacts = factMatches.filter(({ items }) => items.length);
+    const evidence = uniqueEvidence(supportedFacts.flatMap(({ items }) => items));
     if (evidence.length) {
       return {
-        answer:
-          "Amina reports interrupted sleep, fatigue, difficulty standing at work, leaving work early and reduced confidence in completing a shift.",
+        answer: `Amina reports ${naturalList(supportedFacts.map(({ text }) => text))}.`,
         supportLevel: "supported",
         missingInformation: null,
         evidence,
@@ -142,9 +176,30 @@ const deterministicFallback = (
       /analgesia|discharg|gp follow-up/,
     ]);
     if (evidence.length) {
+      const combined = evidence.map(searchableText).join(" ");
+      const facts = [
+        /severe.*pelvic|pelvic.*severe|8\/10/.test(combined)
+          ? "severe pelvic pain"
+          : null,
+        /stable observations|observations were stable/.test(combined)
+          ? "stable observations"
+          : null,
+        /blood results.*within|within.*blood results/.test(combined)
+          ? "displayed blood results within range"
+          : null,
+        /negative pregnancy|pregnancy test.*negative/.test(combined)
+          ? "a negative pregnancy test"
+          : null,
+        /analgesia/.test(combined) ? "analgesia" : null,
+        /discharg/.test(combined) ? "discharge" : null,
+        /gp follow-up|follow up with her gp/.test(combined)
+          ? "GP follow-up advice"
+          : null,
+      ].filter((fact): fact is string => Boolean(fact));
       return {
-        answer:
-          "The recorded A&E encounter describes severe pelvic pain, stable observations, displayed blood results within range, a negative pregnancy test, analgesia and discharge with GP follow-up advice.",
+        answer: facts.length
+          ? `The recorded A&E encounter describes ${naturalList(facts)}.`
+          : "An A&E encounter is recorded, but its details are not available in the supplied evidence.",
         supportLevel: "supported",
         missingInformation: null,
         evidence,
@@ -226,6 +281,7 @@ export class ContextQuestionService {
           maxOutputTokens: 1_024,
           responseMimeType: "application/json",
           responseJsonSchema: askThreadResponseJsonSchema,
+          thinkingConfig: getGeminiThinkingConfig(),
           abortSignal: AbortSignal.timeout(20_000),
         },
       });

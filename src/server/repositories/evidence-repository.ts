@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { getSupabaseAdmin } from "@/lib/supabase";
 import type { EvidenceRecord, EvidenceReference } from "@/server/types/domain";
+import type { Json } from "@/types/database.types";
 
 import { fallbackStore } from "@/server/repositories/fallback-store";
 import {
@@ -16,6 +17,9 @@ import {
   requireSuccessfulQuery,
   withRepositoryFallback,
 } from "@/server/repositories/repository-support";
+
+const asJsonObject = (value: Record<string, unknown>): Json =>
+  value as Json;
 
 const nonEmptyExactString = z.string().refine((value) => value.trim().length > 0);
 const voiceTranscriptEvidenceInputSchema = z.object({
@@ -36,17 +40,110 @@ export type CreateVoiceTranscriptEvidenceInput = z.infer<
   typeof voiceTranscriptEvidenceInputSchema
 >;
 
+const confirmedEvidenceInputSchema = z.object({
+  patientId: z.string().uuid(),
+  patientUpdateId: z.string().uuid(),
+  sourceType: z.enum(["voice_transcript", "patient_text_update"]),
+  title: nonEmptyExactString,
+  originalContent: nonEmptyExactString,
+  translatedContent: z.string().optional(),
+  occurredAt: z
+    .string()
+    .datetime({ offset: true, message: "Use an ISO 8601 date and time." }),
+  metadata: z.record(z.string(), z.unknown()),
+});
+
+export type UpsertConfirmedEvidenceInput = z.infer<
+  typeof confirmedEvidenceInputSchema
+>;
+
 export class EvidenceRepository {
   async createVoiceTranscriptEvidence(
     input: CreateVoiceTranscriptEvidenceInput,
   ): Promise<EvidenceRecord> {
     const validated = voiceTranscriptEvidenceInputSchema.parse(input);
+    return this.upsertConfirmedEvidence({
+      patientId: validated.patientId,
+      patientUpdateId: validated.patientUpdateId,
+      sourceType: "voice_transcript",
+      title: "Patient voice update",
+      originalContent: validated.originalTranscript,
+      ...(validated.translatedTranscript === undefined
+        ? {}
+        : { translatedContent: validated.translatedTranscript }),
+      occurredAt: validated.occurredAt,
+      metadata: {
+        inputType: "voice",
+        detectedLanguage: validated.detectedLanguage ?? null,
+        preferredLanguage: validated.preferredLanguage ?? null,
+        transcriptionProvider: validated.transcriptionProvider,
+        transcriptionMode: validated.transcriptionMode,
+      },
+    });
+  }
+
+  /**
+   * Idempotent evidence write keyed by patient_update source_id.
+   * Repeated saves of the same confirmed update update the existing row
+   * instead of inserting duplicates.
+   */
+  async upsertConfirmedEvidence(
+    input: UpsertConfirmedEvidenceInput,
+  ): Promise<EvidenceRecord> {
+    const validated = confirmedEvidenceInputSchema.parse(input);
     const client = getSupabaseAdmin();
     if (!client) {
       throw new RepositoryError(
-        "EvidenceRepository.createVoiceTranscriptEvidence",
-        "SUPABASE_SECRET_KEY is not configured for live transcription persistence.",
+        "EvidenceRepository.upsertConfirmedEvidence",
+        "SUPABASE_SECRET_KEY is not configured for confirmed update persistence.",
       );
+    }
+
+    const existingResult = await client
+      .from("evidence_records")
+      .select(
+        "id, patient_id, source_type, source_id, title, original_content, translated_content, occurred_at, metadata, created_at",
+      )
+      .eq("patient_id", validated.patientId)
+      .eq("source_id", validated.patientUpdateId)
+      .order("created_at", { ascending: true })
+      .limit(1);
+
+    requireSuccessfulQuery(
+      "EvidenceRepository.upsertConfirmedEvidence.lookup",
+      existingResult.error,
+    );
+
+    const existingRow = existingResult.data?.[0];
+    if (existingRow) {
+      const { data, error } = await client
+        .from("evidence_records")
+        .update({
+          source_type: validated.sourceType,
+          title: validated.title,
+          original_content: validated.originalContent,
+          translated_content: validated.translatedContent ?? null,
+          occurred_at: validated.occurredAt,
+          metadata: asJsonObject(validated.metadata),
+        })
+        .eq("id", existingRow.id)
+        .eq("patient_id", validated.patientId)
+        .select(
+          "id, patient_id, source_type, source_id, title, original_content, translated_content, occurred_at, metadata, created_at",
+        )
+        .single();
+
+      requireSuccessfulQuery(
+        "EvidenceRepository.upsertConfirmedEvidence.update",
+        error,
+      );
+      if (!data) {
+        throw new RepositoryError(
+          "EvidenceRepository.upsertConfirmedEvidence",
+          "Supabase returned no evidence record after update.",
+        );
+      }
+      return mapEvidenceRecord(data);
     }
 
     const evidenceId = randomUUID();
@@ -55,19 +152,13 @@ export class EvidenceRepository {
       .insert({
         id: evidenceId,
         patient_id: validated.patientId,
-        source_type: "voice_transcript",
+        source_type: validated.sourceType,
         source_id: validated.patientUpdateId,
-        title: "Patient voice update",
-        original_content: validated.originalTranscript,
-        translated_content: validated.translatedTranscript ?? null,
+        title: validated.title,
+        original_content: validated.originalContent,
+        translated_content: validated.translatedContent ?? null,
         occurred_at: validated.occurredAt,
-        metadata: {
-          inputType: "voice",
-          detectedLanguage: validated.detectedLanguage ?? null,
-          preferredLanguage: validated.preferredLanguage ?? null,
-          transcriptionProvider: validated.transcriptionProvider,
-          transcriptionMode: validated.transcriptionMode,
-        },
+        metadata: asJsonObject(validated.metadata),
       })
       .select(
         "id, patient_id, source_type, source_id, title, original_content, translated_content, occurred_at, metadata, created_at",
@@ -87,11 +178,11 @@ export class EvidenceRepository {
         );
       }
       requireSuccessfulQuery(
-        "EvidenceRepository.createVoiceTranscriptEvidence",
+        "EvidenceRepository.upsertConfirmedEvidence.insert",
         error,
       );
       throw new RepositoryError(
-        "EvidenceRepository.createVoiceTranscriptEvidence",
+        "EvidenceRepository.upsertConfirmedEvidence",
         "Supabase returned an invalid evidence record row.",
       );
     }

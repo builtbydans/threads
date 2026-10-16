@@ -30,6 +30,7 @@ type RecorderStatus =
   | "unavailable"
   | "error";
 
+/** Base bar heights — preserved visual style; scaled by live mic levels while recording. */
 const waveformBars = [
   9, 18, 12, 25, 16, 31, 20, 35, 14, 28, 19, 33, 17, 26, 12, 22, 15, 30, 18, 24,
   11, 20, 14, 9,
@@ -52,6 +53,16 @@ function formatDuration(totalSeconds: number) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function resolveAudioContextClass(): typeof AudioContext | null {
+  if (typeof window === "undefined") return null;
+  return (
+    window.AudioContext ??
+    (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext ??
+    null
+  );
+}
+
 export function VoiceRecorder({
   onRecordingChange,
   onUseWriting,
@@ -67,12 +78,19 @@ export function VoiceRecorder({
     null,
   );
   const [errorMessage, setErrorMessage] = React.useState("");
+  const [barHeights, setBarHeights] = React.useState(waveformBars);
+  const [analysisActive, setAnalysisActive] = React.useState(false);
   const recorderRef = React.useRef<MediaRecorder | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const chunksRef = React.useRef<BlobPart[]>([]);
   const timerRef = React.useRef<number | null>(null);
   const startedAtRef = React.useRef<number>(0);
   const recordingUrlRef = React.useRef<string | null>(null);
+  const audioContextRef = React.useRef<AudioContext | null>(null);
+  const analyserRef = React.useRef<AnalyserNode | null>(null);
+  const sourceNodeRef = React.useRef<MediaStreamAudioSourceNode | null>(null);
+  const rafRef = React.useRef<number | null>(null);
+  const frequencyDataRef = React.useRef<Uint8Array<ArrayBuffer> | null>(null);
 
   const stopTracks = React.useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -84,13 +102,93 @@ export function VoiceRecorder({
     timerRef.current = null;
   }, []);
 
+  const stopWaveformAnalysis = React.useCallback(() => {
+    if (rafRef.current !== null) {
+      window.cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    try {
+      sourceNodeRef.current?.disconnect();
+    } catch {
+      // Node may already be disconnected.
+    }
+    sourceNodeRef.current = null;
+    analyserRef.current = null;
+    frequencyDataRef.current = null;
+    const context = audioContextRef.current;
+    audioContextRef.current = null;
+    if (context) {
+      void context.close().catch(() => undefined);
+    }
+    setAnalysisActive(false);
+    setBarHeights(waveformBars);
+  }, []);
+
+  const startWaveformAnalysis = React.useCallback(
+    (stream: MediaStream) => {
+      const AudioContextClass = resolveAudioContextClass();
+      if (!AudioContextClass) {
+        setAnalysisActive(false);
+        return;
+      }
+
+      try {
+        const audioContext = new AudioContextClass();
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 64;
+        analyser.smoothingTimeConstant = 0.72;
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(analyser);
+
+        audioContextRef.current = audioContext;
+        analyserRef.current = analyser;
+        sourceNodeRef.current = source;
+        frequencyDataRef.current = new Uint8Array(
+          new ArrayBuffer(analyser.frequencyBinCount),
+        );
+        setAnalysisActive(true);
+
+        const tick = () => {
+          const activeAnalyser = analyserRef.current;
+          const data = frequencyDataRef.current;
+          if (!activeAnalyser || !data) return;
+
+          activeAnalyser.getByteFrequencyData(data);
+          const binCount = data.length;
+          const nextHeights = waveformBars.map((baseHeight, index) => {
+            const binIndex = Math.min(
+              binCount - 1,
+              Math.floor((index / waveformBars.length) * binCount),
+            );
+            const level = (data[binIndex] ?? 0) / 255;
+            const idleHeight = Math.max(4, baseHeight * 0.28);
+            const peakHeight = baseHeight;
+            return Math.round(
+              idleHeight + (peakHeight - idleHeight) * Math.min(1, level * 1.85),
+            );
+          });
+          setBarHeights(nextHeights);
+          rafRef.current = window.requestAnimationFrame(tick);
+        };
+
+        void audioContext.resume().catch(() => undefined);
+        rafRef.current = window.requestAnimationFrame(tick);
+      } catch {
+        stopWaveformAnalysis();
+        setAnalysisActive(false);
+      }
+    },
+    [stopWaveformAnalysis],
+  );
+
   React.useEffect(
     () => () => {
       stopTimer();
+      stopWaveformAnalysis();
       stopTracks();
       if (recordingUrlRef.current) URL.revokeObjectURL(recordingUrlRef.current);
     },
-    [stopTimer, stopTracks],
+    [stopTimer, stopTracks, stopWaveformAnalysis],
   );
 
   const startRecording = async () => {
@@ -113,6 +211,7 @@ export function VoiceRecorder({
       streamRef.current = stream;
       chunksRef.current = [];
       setElapsedSeconds(0);
+      setBarHeights(waveformBars);
 
       const selectedMimeType = selectAudioMimeType();
       const recorder = new MediaRecorder(
@@ -125,6 +224,7 @@ export function VoiceRecorder({
       };
       recorder.onerror = () => {
         stopTimer();
+        stopWaveformAnalysis();
         stopTracks();
         setErrorMessage(
           "The recording stopped unexpectedly. You can try again or write your update instead.",
@@ -133,6 +233,7 @@ export function VoiceRecorder({
       };
       recorder.onstop = async () => {
         stopTimer();
+        stopWaveformAnalysis();
         stopTracks();
         const recordedBlob = new Blob(chunksRef.current, {
           type: recorder.mimeType || selectedMimeType || "audio/webm",
@@ -185,6 +286,7 @@ export function VoiceRecorder({
       };
 
       recorder.start(250);
+      startWaveformAnalysis(stream);
       startedAtRef.current = Date.now();
       timerRef.current = window.setInterval(() => {
         setElapsedSeconds(
@@ -194,6 +296,7 @@ export function VoiceRecorder({
       setStatus("recording");
     } catch (error) {
       stopTimer();
+      stopWaveformAnalysis();
       stopTracks();
       const name = error instanceof DOMException ? error.name : "";
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
@@ -301,6 +404,8 @@ export function VoiceRecorder({
 
   const isRecording = status === "recording";
   const isRequesting = status === "requesting";
+  const displayHeights = isRecording ? barHeights : waveformBars;
+  const useCssFallbackWave = isRecording && !analysisActive;
 
   return (
     <div
@@ -319,14 +424,20 @@ export function VoiceRecorder({
           className="mx-auto flex h-12 max-w-xs items-center justify-center gap-1"
           aria-hidden="true"
         >
-          {waveformBars.map((height, index) => (
+          {displayHeights.map((height, index) => (
             <span
-              key={`${height}-${index}`}
+              key={`bar-${index}`}
               className={cn(
                 "w-1 rounded-full",
-                isRecording ? "animate-wave bg-plum-200" : "bg-plum-200",
+                isRecording ? "bg-plum-200" : "bg-plum-200",
+                useCssFallbackWave && "animate-wave",
               )}
-              style={{ height, animationDelay: `${index * 45}ms` }}
+              style={{
+                height,
+                ...(useCssFallbackWave
+                  ? { animationDelay: `${index * 45}ms` }
+                  : { transition: "height 80ms linear" }),
+              }}
             />
           ))}
         </div>

@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { seedTimelineEvents } from "@/data/seed";
+import { sortTimelineEventsNewestFirst } from "@/lib/timeline-order";
 import type { TimelineEvent } from "@/server/types/domain";
 
 const STORAGE_KEY = "thread.demo.timeline-events.v1";
@@ -21,10 +22,6 @@ type TimelineApiEnvelope = {
   data?: { events?: unknown[] };
 };
 
-function sortEvents(events: TimelineEvent[]) {
-  return [...events].sort((a, b) => new Date(b.recordedAt).getTime() - new Date(a.recordedAt).getTime());
-}
-
 function isTimelineEvent(value: unknown): value is TimelineEvent {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<TimelineEvent>;
@@ -35,7 +32,9 @@ function isTimelineEvent(value: unknown): value is TimelineEvent {
 }
 
 export function DemoDataProvider({ children }: { children: React.ReactNode }) {
-  const [events, setEvents] = React.useState<TimelineEvent[]>(() => sortEvents(seedTimelineEvents));
+  const [events, setEvents] = React.useState<TimelineEvent[]>(() =>
+    sortTimelineEventsNewestFirst(seedTimelineEvents),
+  );
   const [isHydrated, setIsHydrated] = React.useState(false);
 
   React.useEffect(() => {
@@ -74,7 +73,7 @@ export function DemoDataProvider({ children }: { children: React.ReactNode }) {
       repositoryEvents.forEach((event) => merged.set(event.id, event));
       window.clearTimeout(timeout);
       if (!cancelled) {
-        setEvents(sortEvents(Array.from(merged.values())));
+        setEvents(sortTimelineEventsNewestFirst(Array.from(merged.values())));
         setIsHydrated(true);
       }
     };
@@ -96,7 +95,7 @@ export function DemoDataProvider({ children }: { children: React.ReactNode }) {
   const addEvent = React.useCallback((event: TimelineEvent) => {
     setEvents((current) => {
       const withoutDuplicate = current.filter((item) => item.id !== event.id);
-      const next = sortEvents([event, ...withoutDuplicate]);
+      const next = sortTimelineEventsNewestFirst([event, ...withoutDuplicate]);
       syncLocalEvents(next);
       return next;
     });
@@ -112,7 +111,7 @@ export function DemoDataProvider({ children }: { children: React.ReactNode }) {
 
   const resetLocalEvents = React.useCallback(() => {
     window.localStorage.removeItem(STORAGE_KEY);
-    setEvents(sortEvents(seedTimelineEvents));
+    setEvents(sortTimelineEventsNewestFirst(seedTimelineEvents));
   }, []);
 
   const value = React.useMemo(() => ({ events, isHydrated, addEvent, removeLocalEvent, resetLocalEvents }), [events, isHydrated, addEvent, removeLocalEvent, resetLocalEvents]);

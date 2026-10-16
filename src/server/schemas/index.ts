@@ -11,6 +11,8 @@ const isoDateTime = z
   .string()
   .datetime({ offset: true, message: "Use an ISO 8601 date and time." });
 
+export const transcriptionModeSchema = z.enum(["runware", "fallback", "typed"]);
+
 export const patientUpdateInputSchema = z.object({
   patientId: z.string().uuid().default(DEMO_PATIENT_ID),
   originalText: z
@@ -28,6 +30,8 @@ export const patientUpdateInputSchema = z.object({
     .max(6)
     .default([]),
   audioUrl: z.string().url().optional(),
+  /** How the text was produced; voice organise should pass runware or fallback. */
+  transcriptionMode: transcriptionModeSchema.optional(),
   save: z.boolean().default(false),
 });
 
@@ -58,7 +62,18 @@ export const reviewedPatientEventSchema = z.object({
     adherence: z.string().trim().min(1).max(500).optional(),
     reportedSideEffects: shortStringArray.optional(),
   }).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
+  metadata: z
+    .object({
+      transcriptionMode: transcriptionModeSchema,
+      categories: z
+        .array(z.enum(["pain", "sleep", "medication", "work", "mobility", "mood"]))
+        .max(6)
+        .optional(),
+      structuredUpdate: z.record(z.string(), z.unknown()).optional(),
+      organisedBy: z.string().optional(),
+      clinicalVerificationStatus: z.string().optional(),
+    })
+    .passthrough(),
 });
 
 export type ReviewedPatientEventInput = z.infer<typeof reviewedPatientEventSchema>;

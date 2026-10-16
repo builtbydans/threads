@@ -3,6 +3,7 @@ import "server-only";
 import { z } from "zod";
 
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { compareTimelineEventsNewestFirst } from "@/lib/timeline-order";
 import { evidenceRepository } from "@/server/repositories/evidence-repository";
 import { fallbackStore } from "@/server/repositories/fallback-store";
 import {
@@ -16,9 +17,6 @@ import {
   withRepositoryFallback,
 } from "@/server/repositories/repository-support";
 import type { TimelineEvent } from "@/server/types/domain";
-
-const newestFirst = (left: TimelineEvent, right: TimelineEvent) =>
-  Date.parse(right.recordedAt) - Date.parse(left.recordedAt);
 
 const exactNonEmptyString = z.string().refine((value) => value.trim().length > 0);
 const liveVoiceProjectionSchema = z.object({
@@ -74,13 +72,15 @@ export class TimelineRepository {
         const encounterEvents = (encountersResult.data ?? []).map(
           mapClinicalEncounterTimelineEvent,
         );
-        return [...updateEvents, ...encounterEvents].sort(newestFirst);
+        return [...updateEvents, ...encounterEvents].sort(
+          compareTimelineEventsNewestFirst,
+        );
       },
       fallback: () =>
         structuredClone(
           fallbackStore.timelineEvents
             .filter((event) => event.patientId === patientId)
-            .sort(newestFirst),
+            .sort(compareTimelineEventsNewestFirst),
         ),
     });
   }
@@ -161,6 +161,51 @@ export class TimelineRepository {
         return structuredClone(event);
       },
     });
+  }
+
+  /**
+   * Durable confirmed save: requires the admin client and never falls back to
+   * in-memory seed data. Upserts by event id so repeated saves are idempotent.
+   */
+  async saveConfirmedPatientUpdate(
+    event: TimelineEvent,
+  ): Promise<TimelineEvent> {
+    if (event.sourceKind !== "patient_reported") {
+      throw new RepositoryError(
+        "TimelineRepository.saveConfirmedPatientUpdate",
+        "Only patient-reported updates can be confirmed into patient_updates.",
+      );
+    }
+
+    const client = getSupabaseAdmin();
+    if (!client) {
+      throw new RepositoryError(
+        "TimelineRepository.saveConfirmedPatientUpdate",
+        "SUPABASE_SECRET_KEY is not configured for confirmed update persistence.",
+      );
+    }
+
+    const { data, error } = await client
+      .from("patient_updates")
+      .upsert(patientUpdateInsertFromTimelineEvent(event), {
+        onConflict: "id",
+      })
+      .select(patientUpdateSelect)
+      .single();
+
+    requireSuccessfulQuery(
+      "TimelineRepository.saveConfirmedPatientUpdate",
+      error,
+    );
+    if (!data) {
+      throw new RepositoryError(
+        "TimelineRepository.saveConfirmedPatientUpdate",
+        "Supabase returned no patient update row.",
+      );
+    }
+
+    const evidence = await evidenceRepository.listForObservation(event.id);
+    return mapPatientUpdateTimelineEvent(data, evidence);
   }
 
   async createLiveVoiceProjection(

@@ -144,14 +144,51 @@ export function mapEvidenceReference(row: EvidenceRecordRow): EvidenceReference 
     ...(translatedExcerpt ? { translatedExcerpt } : {}),
     recordedAt: row.occurred_at,
     ...(typeof language === "string" ? { language } : {}),
+    metadata,
   };
 }
+
+const reviewedStructuredFromEvidence = (
+  evidenceRefs: EvidenceReference[],
+): Record<string, unknown> | undefined => {
+  for (const reference of evidenceRefs) {
+    const reviewed = reference.metadata?.reviewedStructuredUpdate;
+    if (reviewed && typeof reviewed === "object" && !Array.isArray(reviewed)) {
+      return reviewed as Record<string, unknown>;
+    }
+  }
+  return undefined;
+};
+
+const stringArrayField = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter(
+    (item): item is string => typeof item === "string" && item.trim().length > 0,
+  );
+  return items.length ? items : undefined;
+};
 
 export function mapPatientUpdateTimelineEvent(
   row: PatientUpdateRow,
   evidenceRefs: EvidenceReference[] = [],
 ): TimelineEvent {
   const update = mapPatientUpdate(row);
+  const reviewed = reviewedStructuredFromEvidence(evidenceRefs);
+  const severity =
+    typeof reviewed?.severity === "number" ? reviewed.severity : undefined;
+  const symptoms = stringArrayField(reviewed?.symptoms);
+  const bodyLocations = stringArrayField(reviewed?.bodyLocations);
+  const functionalImpacts = stringArrayField(reviewed?.functionalImpacts);
+  const medicationDetails =
+    reviewed?.medicationDetails &&
+    typeof reviewed.medicationDetails === "object" &&
+    !Array.isArray(reviewed.medicationDetails)
+      ? (reviewed.medicationDetails as TimelineEvent["medicationDetails"])
+      : undefined;
+  const transcriptionMode = evidenceRefs
+    .map((reference) => reference.metadata?.transcriptionMode)
+    .find((mode) => typeof mode === "string");
+
   return {
     id: update.id,
     patientId: update.patientId,
@@ -175,10 +212,23 @@ export function mapPatientUpdateTimelineEvent(
     ...(update.englishTranslation
       ? { translatedText: update.englishTranslation }
       : {}),
+    ...(severity === undefined ? {} : { severity }),
+    ...(symptoms ? { symptoms } : {}),
+    ...(bodyLocations ? { bodyLocations } : {}),
+    ...(functionalImpacts ? { functionalImpacts } : {}),
+    ...(medicationDetails ? { medicationDetails } : {}),
     ...(evidenceRefs.length ? { evidenceRefs } : {}),
+    metadata: {
+      ...(typeof transcriptionMode === "string"
+        ? { transcriptionMode }
+        : {}),
+      ...(reviewed ? { structuredUpdate: reviewed } : {}),
+      clinicalVerificationStatus: "not_clinically_verified",
+    },
     structuredData: {
       patientUpdateId: update.id,
       processingStatus: update.processingStatus,
+      ...(reviewed ? { reviewedStructuredUpdate: reviewed } : {}),
     },
   };
 }

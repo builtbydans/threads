@@ -43,6 +43,9 @@ export function UpdateReview({
   onEdit,
   onCancel,
   saving,
+  saveDisabled = false,
+  saveDisabledReason,
+  saveError,
 }: {
   structuredUpdate: StructuredPatientUpdate;
   event: TimelineEvent;
@@ -50,6 +53,9 @@ export function UpdateReview({
   onEdit: () => void;
   onCancel: () => void;
   saving: boolean;
+  saveDisabled?: boolean;
+  saveDisabledReason?: string;
+  saveError?: string;
 }) {
   const medicationNotes = [
     ...(structuredUpdate.medicationNotes ?? []),
@@ -127,12 +133,30 @@ export function UpdateReview({
 
         <Separator />
         <div className="flex flex-col gap-3 bg-white px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-          <p className="max-w-md text-[11px] leading-5 text-muted-foreground">Saving adds this patient-reported update to your Thread. You can still explain or correct it in a future update.</p>
+          <p className="max-w-md text-[11px] leading-5 text-muted-foreground">
+            {saveDisabledReason ??
+              "Saving confirms this patient-reported update and writes it to your durable Thread. You can still explain or correct it in a future update."}
+          </p>
           <div className="flex gap-2">
             <Button type="button" variant="ghost" size="sm" onClick={onCancel} disabled={saving}>Cancel</Button>
-            <Button type="button" onClick={onSave} disabled={saving}>{saving ? <LoaderCircle className="animate-spin" /> : <Save />} {saving ? "Saving…" : "Save to timeline"}</Button>
+            <Button
+              type="button"
+              onClick={onSave}
+              disabled={saving || saveDisabled}
+            >
+              {saving ? <LoaderCircle className="animate-spin" /> : <Save />}{" "}
+              {saving ? "Saving…" : "Save to timeline"}
+            </Button>
           </div>
         </div>
+        {saveError ? (
+          <div
+            className="border-t border-amber-200 bg-amber-50 px-5 py-4 text-xs leading-5 text-amber-950 sm:px-6"
+            role="alert"
+          >
+            {saveError}
+          </div>
+        ) : null}
       </Card>
 
       <SafetyNotice className="mx-auto mt-5 max-w-2xl" compact />

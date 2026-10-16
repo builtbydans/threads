@@ -34,7 +34,6 @@ import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { demoPatient } from "@/data/seed";
-import { FALLBACK_TRANSCRIPT } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import type {
   StructuredPatientUpdate,
@@ -55,12 +54,7 @@ type TranscriptionPreview = {
   englishTranslation?: string;
   mode: "fallback" | "runware";
   notice?: string;
-  patientUpdateId?: string;
-  evidenceId?: string;
-  timelineEventId?: string;
   persisted?: boolean;
-  rawPersisted?: boolean;
-  persistenceStatus?: "completed" | "raw_saved_timeline_failed";
 };
 
 type PatientUpdateSubmission = {
@@ -72,6 +66,7 @@ type PatientUpdateSubmission = {
   language?: string;
   severity?: number;
   categories: string[];
+  transcriptionMode: "runware" | "fallback" | "typed";
 };
 
 type ApiEnvelope<T> = {
@@ -290,13 +285,16 @@ export default function PatientUpdatePage() {
   const [categories, setCategories] = React.useState<string[]>([]);
   const [severity, setSeverity] = React.useState<number | null>(null);
   const [recordedAt, setRecordedAt] = React.useState(() =>
-    localDateTimeValue(new Date("2026-07-17T14:30:00+01:00")),
+    localDateTimeValue(new Date()),
   );
   const [activeStep, setActiveStep] = React.useState(0);
   const [review, setReview] = React.useState<ReviewResult | null>(null);
   const [error, setError] = React.useState("");
   const [processingNotice, setProcessingNotice] = React.useState("");
   const [isSaving, setIsSaving] = React.useState(false);
+  const [saveError, setSaveError] = React.useState("");
+  const [durableSaved, setDurableSaved] = React.useState(false);
+  const saveInFlightRef = React.useRef(false);
   const [transcription, setTranscription] =
     React.useState<TranscriptionPreview | null>(null);
   const [isTranscribing, setIsTranscribing] = React.useState(false);
@@ -391,6 +389,7 @@ export default function PatientUpdatePage() {
     }
 
     setError("");
+    setSaveError("");
     setProcessingNotice("");
     setPhase("processing");
     setActiveStep(0);
@@ -402,6 +401,8 @@ export default function PatientUpdatePage() {
       let originalText = text.trim();
       let translatedText: string | undefined;
       let detectedLanguage = mode === "speak" ? recordingLanguage : "English";
+      let transcriptionMode: PatientUpdateSubmission["transcriptionMode"] =
+        mode === "speak" ? "runware" : "typed";
 
       if (mode === "speak" && recording) {
         try {
@@ -411,13 +412,23 @@ export default function PatientUpdatePage() {
           originalText = result.originalTranscript;
           translatedText = result.englishTranslation;
           detectedLanguage = result.detectedLanguage ?? recordingLanguage;
-          if (result.notice) setProcessingNotice(result.notice);
-        } catch {
-          originalText = FALLBACK_TRANSCRIPT;
-          detectedLanguage = "English";
-          setProcessingNotice(
-            "Live transcription was unavailable, so this review uses the synthetic demonstration transcript.",
+          transcriptionMode = result.mode;
+          if (result.mode === "fallback") {
+            setProcessingNotice(
+              result.notice ??
+                "This is a synthetic demonstration transcript, not a transcription of your recording. It cannot be saved to your durable health story.",
+            );
+          } else if (result.notice) {
+            setProcessingNotice(result.notice);
+          }
+        } catch (transcriptionFailure) {
+          setPhase("compose");
+          setError(
+            transcriptionFailure instanceof Error
+              ? transcriptionFailure.message
+              : "Live transcription was unavailable. Thread will not invent spoken words. Try again, or choose Write instead.",
           );
+          return;
         }
       } else {
         await delay(650);
@@ -446,6 +457,7 @@ export default function PatientUpdatePage() {
         ...(detectedLanguage ? { language: detectedLanguage } : {}),
         ...(severity === null ? {} : { severity }),
         categories,
+        transcriptionMode,
       };
 
       let result: ReviewResult;
@@ -466,10 +478,24 @@ export default function PatientUpdatePage() {
         result = body.data;
       } catch {
         result = browserFallbackResult(fallbackInput);
+        result = {
+          ...result,
+          event: {
+            ...result.event,
+            metadata: {
+              ...result.event.metadata,
+              transcriptionMode,
+              categories,
+              structuredUpdate: result.structuredUpdate,
+              organisedBy: "Thread",
+              clinicalVerificationStatus: "not_clinically_verified",
+            },
+          },
+        };
         setProcessingNotice(
           (current) =>
             current ||
-            "The server organiser was unavailable, so a deterministic demonstration review was prepared in this browser.",
+            "The server organiser was unavailable, so a deterministic demonstration review was prepared in this browser. Saving still requires a durable server confirmation.",
         );
       }
 
@@ -496,11 +522,24 @@ export default function PatientUpdatePage() {
   };
 
   const saveReview = async () => {
-    if (!review) return;
-    setIsSaving(true);
+    if (!review || saveInFlightRef.current) return;
 
-    let eventToSave = review.event;
-    let savedToRepository = false;
+    const transcriptionMode = review.event.metadata?.transcriptionMode;
+    if (transcriptionMode === "fallback") {
+      setSaveError(
+        "This transcript is synthetic demonstration text, not your recording. Thread will not save it as your spoken words. Record again when live transcription is available, or choose Write instead.",
+      );
+      toast.error("Synthetic transcript not saved", {
+        description:
+          "A durable health-story save requires a real transcription or a typed update.",
+      });
+      return;
+    }
+
+    saveInFlightRef.current = true;
+    setIsSaving(true);
+    setSaveError("");
+
     try {
       const response = await fetch("/api/patient-updates", {
         method: "PUT",
@@ -510,31 +549,36 @@ export default function PatientUpdatePage() {
       const body = (await response.json()) as ApiEnvelope<{
         event: TimelineEvent;
         saved: boolean;
+        durable?: boolean;
       }>;
-      if (!response.ok || !body.ok || !body.data)
+      if (!response.ok || !body.ok || !body.data?.saved) {
         throw new Error(
           body.error?.message ??
-            "The update could not be saved to the configured repository.",
+            "The update could not be saved to your health story.",
         );
-      eventToSave = body.data.event;
-      savedToRepository = body.data.saved;
-    } catch {
-      savedToRepository = false;
-    }
+      }
 
-    addEvent(eventToSave);
-    if (savedToRepository) {
+      addEvent(body.data.event);
+      setDurableSaved(true);
       toast.success("Update saved to your timeline", {
-        description: "Your patient-reported update is now part of your Thread.",
-      });
-    } else {
-      toast.success("Update saved in this browser", {
         description:
-          "The configured data service was unavailable, so Thread preserved this demo update locally.",
+          "Your confirmed patient-reported update is now part of your Thread.",
       });
+      setPhase("saved");
+    } catch (saveFailure) {
+      const message =
+        saveFailure instanceof Error
+          ? saveFailure.message
+          : "The update could not be saved to your health story.";
+      setSaveError(message);
+      setDurableSaved(false);
+      toast.error("Save failed", {
+        description: message,
+      });
+    } finally {
+      saveInFlightRef.current = false;
+      setIsSaving(false);
     }
-    setIsSaving(false);
-    setPhase("saved");
   };
 
   const startAnother = () => {
@@ -549,6 +593,8 @@ export default function PatientUpdatePage() {
     setIsTranscribing(false);
     setProcessingNotice("");
     setIsSaving(false);
+    setSaveError("");
+    setDurableSaved(false);
     setError("");
     setPhase("compose");
   };
@@ -562,6 +608,7 @@ export default function PatientUpdatePage() {
   }
 
   if (phase === "review" && review) {
+    const isSynthetic = review.event.metadata?.transcriptionMode === "fallback";
     return (
       <main className="mx-auto w-full max-w-4xl px-5 py-7 sm:px-7 sm:py-10 lg:px-8">
         {processingNotice ? (
@@ -577,6 +624,13 @@ export default function PatientUpdatePage() {
           onEdit={editReview}
           onCancel={() => setPhase("compose")}
           saving={isSaving}
+          saveDisabled={isSynthetic}
+          saveDisabledReason={
+            isSynthetic
+              ? "Synthetic demonstration transcripts cannot be saved as your spoken words. Record again with live transcription, or use Write instead."
+              : undefined
+          }
+          saveError={saveError}
         />
       </main>
     );
@@ -591,14 +645,17 @@ export default function PatientUpdatePage() {
               <Check className="size-7" />
             </span>
             <p className="mt-6 text-xs font-semibold uppercase tracking-[.12em] text-sage-700">
-              Saved to your Thread
+              {durableSaved ? "Saved to your Thread" : "Not saved durably"}
             </p>
             <h1 className="mt-2 text-3xl font-semibold tracking-[-.045em] sm:text-4xl">
-              Your update is part of the story.
+              {durableSaved
+                ? "Your update is part of the story."
+                : "This update was not confirmed."}
             </h1>
             <p className="mx-auto mt-4 max-w-lg text-sm leading-6 text-muted-foreground">
-              It is clearly marked as patient-reported. Thread has organised the
-              details, but has not clinically verified them.
+              {durableSaved
+                ? "It is clearly marked as patient-reported. Thread has organised the details, but has not clinically verified them. Refresh the clinician view to see the same confirmed record."
+                : "Thread did not write this update to the shared health story."}
             </p>
           </div>
           <div className="flex flex-col justify-center gap-3 p-5 sm:flex-row sm:p-6">
@@ -761,11 +818,11 @@ export default function PatientUpdatePage() {
                         {transcription.notice}
                       </p>
                     ) : null}
-                    {transcription.persisted === true ? (
-                      <p className="mt-4 rounded-xl bg-white px-3 py-2 text-[11px] font-medium leading-5 text-sage-800">
-                        Your update has been added to your health story.
-                      </p>
-                    ) : null}
+                    <p className="mt-4 rounded-xl bg-white px-3 py-2 text-[11px] font-medium leading-5 text-sage-800">
+                      {transcription.mode === "runware"
+                        ? "Provisional transcript only — review and confirm before this becomes part of your health story."
+                        : "Synthetic demonstration text — this cannot be saved as your spoken words."}
+                    </p>
                   </div>
                 </div>
               ) : transcriptionError ? (

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 
 import { env, isGeminiConfigured } from "@/lib/env";
 
@@ -16,3 +16,8 @@ export const getGeminiClient = (): GoogleGenAI | null => {
 
 export const getGeminiModel = () =>
   env.geminiModel ?? DEFAULT_GEMINI_MODEL;
+
+export const getGeminiThinkingConfig = () =>
+  getGeminiModel().startsWith("gemini-3")
+    ? ({ thinkingLevel: ThinkingLevel.MINIMAL } as const)
+    : ({ thinkingBudget: 0 } as const);

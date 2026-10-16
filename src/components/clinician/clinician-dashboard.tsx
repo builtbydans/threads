@@ -14,8 +14,8 @@ import {
   FileCheck2,
   FlaskConical,
   History,
-  Languages,
   LoaderCircle,
+  MessageSquareText,
   Pill,
   RefreshCw,
   Search,
@@ -23,7 +23,11 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useDemoData } from "@/components/shared/demo-data-provider";
-import { SourceBadge } from "@/components/shared/source-badge";
+import {
+  SourceBadge,
+  VerificationBadge,
+  VoiceBadge,
+} from "@/components/shared/source-badge";
 import { EvidenceDrawer } from "@/components/evidence/evidence-drawer";
 import { AskThreadPanel } from "@/components/clinician/ask-thread-panel";
 import {
@@ -43,6 +47,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import {
+  resolveEvidenceIdsForEvent,
+  selectLatestPatientReport,
+  selectRecentPatientReports,
+  sortTimelineEventsNewestFirst,
+} from "@/lib/timeline-order";
 import { cn } from "@/lib/utils";
 import type {
   AppointmentBrief,
@@ -81,7 +91,125 @@ function getEvidence(
   evidenceIds: readonly string[],
 ) {
   const ids = new Set(evidenceIds);
-  return evidence.filter((reference) => ids.has(reference.id));
+  return evidence.filter(
+    (reference) => ids.has(reference.id) || ids.has(reference.eventId),
+  );
+}
+
+function structuredChips(event: TimelineEvent) {
+  const chips: string[] = [];
+  if (event.symptoms?.length) chips.push(...event.symptoms.slice(0, 4));
+  if (event.bodyLocations?.length) {
+    chips.push(...event.bodyLocations.slice(0, 2).map((item) => `Location: ${item}`));
+  }
+  if (event.functionalImpacts?.length) {
+    chips.push(...event.functionalImpacts.slice(0, 2));
+  }
+  if (event.medicationDetails?.medicationName) {
+    chips.push(event.medicationDetails.medicationName);
+  }
+  if (event.severity !== undefined) chips.push(`Reported ${event.severity}/10`);
+  return chips;
+}
+
+function LatestPatientReportCard({
+  event,
+  openEvidence,
+  featured = true,
+}: {
+  event: TimelineEvent;
+  openEvidence: (observation: string, evidenceIds: readonly string[]) => void;
+  featured?: boolean;
+}) {
+  const evidenceIds = resolveEvidenceIdsForEvent(event);
+  const chips = structuredChips(event);
+  const patientWording = event.originalText ?? event.summary;
+  const reviewedSummary =
+    event.translatedText && event.translatedText !== event.originalText
+      ? event.translatedText
+      : event.summary !== patientWording
+        ? event.summary
+        : null;
+
+  return (
+    <article
+      className={cn(
+        "rounded-[1.25rem] border bg-white p-5 shadow-card",
+        featured && "border-plum-200 bg-gradient-to-b from-plum-50/80 to-white",
+      )}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[.12em] text-plum-600">
+            {featured ? "Most recent patient report" : "Earlier patient report"}
+          </p>
+          <h3 className="mt-1 text-base font-semibold tracking-[-.02em]">
+            {event.title}
+          </h3>
+          <time
+            className="mt-1 block text-xs text-muted-foreground"
+            dateTime={event.recordedAt}
+          >
+            Occurred {format(new Date(event.recordedAt), "d MMMM yyyy · HH:mm")}
+          </time>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <SourceBadge sourceKind="patient_reported" compact />
+          {event.type === "patient_voice" ? (
+            <VoiceBadge translated={Boolean(event.translatedText)} />
+          ) : null}
+          <VerificationBadge compact />
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-xl border border-plum-100 bg-white/80 p-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[.1em] text-plum-600">
+          Patient wording
+        </p>
+        <p className="mt-1.5 text-sm italic leading-6 text-plum-950">
+          “{patientWording}”
+        </p>
+      </div>
+
+      {reviewedSummary ? (
+        <div className="mt-3">
+          <p className="text-[10px] font-semibold uppercase tracking-[.1em] text-muted-foreground">
+            Reviewed / organised wording
+          </p>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">
+            {reviewedSummary}
+          </p>
+        </div>
+      ) : null}
+
+      {chips.length ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {chips.map((chip) => (
+            <span
+              key={chip}
+              className="rounded-full bg-plum-50 px-2.5 py-1 text-[11px] text-plum-800"
+            >
+              {chip}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      <p className="mt-3 text-[11px] leading-4 text-muted-foreground">
+        Patient-reported · not clinically verified. Structured tags come from
+        the reviewed save, not from a separate clinical assessment.
+      </p>
+
+      <Button
+        variant="ghost"
+        size="sm"
+        className="mt-3 px-1 text-plum-700"
+        onClick={() => openEvidence(event.summary, evidenceIds)}
+      >
+        View source evidence <ChevronRight />
+      </Button>
+    </article>
+  );
 }
 
 function PatientHeader({
@@ -168,7 +296,12 @@ function PatientContextPanel({
 }) {
   const allSummaryEvidence = brief.evidenceIds;
   const lastGpEncounter = events.find((event) => event.type === "gp_review");
-  const recentCare = events
+  const latestPatientReport = selectLatestPatientReport(events);
+  const recentPatientReports = selectRecentPatientReports(events, {
+    limit: 3,
+    excludeId: latestPatientReport?.id,
+  });
+  const recentCare = sortTimelineEventsNewestFirst(events)
     .filter((event) =>
       ["ae_encounter", "gp_review", "referral", "specialist_review"].includes(
         event.type,
@@ -182,7 +315,11 @@ function PatientContextPanel({
       ),
     )
     .flatMap((section) =>
-      section.items.map((item) => ({ label: section.title, value: item.text })),
+      section.items.map((item) => ({
+        label: section.title,
+        value: item.text,
+        evidenceIds: item.evidenceIds,
+      })),
     )
     .slice(0, 4);
   const patientUpdates = events.filter((event) =>
@@ -248,21 +385,97 @@ function PatientContextPanel({
         </dl>
       </section>
 
+      {latestPatientReport ? (
+        <section
+          className="border-b py-5"
+          aria-labelledby="latest-report-heading"
+        >
+          <div className="flex items-center gap-2">
+            <MessageSquareText className="size-3.5 text-plum-600" />
+            <h3
+              id="latest-report-heading"
+              className="text-xs font-semibold uppercase tracking-[.11em] text-muted-foreground"
+            >
+              Latest patient report
+            </h3>
+          </div>
+          <p className="mt-2 text-xs font-semibold leading-5">
+            {latestPatientReport.title}
+          </p>
+          <time
+            className="mt-1 block text-[11px] text-muted-foreground"
+            dateTime={latestPatientReport.recordedAt}
+          >
+            {format(
+              new Date(latestPatientReport.recordedAt),
+              "d MMM yyyy · HH:mm",
+            )}
+          </time>
+          <p className="mt-2 line-clamp-4 text-xs italic leading-5 text-plum-900">
+            “{latestPatientReport.originalText ?? latestPatientReport.summary}”
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <SourceBadge sourceKind="patient_reported" compact />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-1 text-plum-700"
+              onClick={() =>
+                openEvidence(
+                  latestPatientReport.summary,
+                  resolveEvidenceIdsForEvent(latestPatientReport),
+                )
+              }
+            >
+              Evidence <ChevronRight />
+            </Button>
+          </div>
+          {recentPatientReports.length ? (
+            <ol className="mt-4 space-y-2 border-t pt-3">
+              <li className="text-[10px] font-semibold uppercase tracking-[.1em] text-muted-foreground">
+                Earlier reports
+              </li>
+              {recentPatientReports.map((report) => (
+                <li key={report.id} className="text-xs leading-5">
+                  <span className="font-semibold text-muted-foreground">
+                    {format(new Date(report.recordedAt), "d MMM")}
+                  </span>
+                  {" · "}
+                  {report.summary}
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </section>
+      ) : null}
+
       <section className="border-b py-5" aria-labelledby="key-context-heading">
         <h3
           id="key-context-heading"
           className="text-xs font-semibold uppercase tracking-[.11em] text-muted-foreground"
         >
-          Key context
+          Briefing context
         </h3>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          From the appointment brief · AI-organised, not clinically verified
+        </p>
         <dl className="mt-2 divide-y">
-          {keyContext.map(({ label, value }) => (
+          {keyContext.map(({ label, value, evidenceIds }) => (
             <div
               key={`${label}:${value}`}
               className="py-3 first:pt-2 last:pb-0"
             >
-              <dt className="text-[10px] font-medium text-muted-foreground">
-                {label}
+              <dt className="flex items-center justify-between gap-2 text-[10px] font-medium text-muted-foreground">
+                <span>{label}</span>
+                {evidenceIds.length ? (
+                  <button
+                    type="button"
+                    onClick={() => openEvidence(value, evidenceIds)}
+                    className="text-[10px] font-semibold text-plum-700 hover:underline"
+                  >
+                    Evidence
+                  </button>
+                ) : null}
               </dt>
               <dd className="mt-1 text-xs font-semibold leading-5">{value}</dd>
             </div>
@@ -429,24 +642,26 @@ function ClinicalInvestigation({
   setEncounterEvent: (event: TimelineEvent | null) => void;
   runImport: () => void;
 }) {
-  const medicationEvents = events
+  const orderedEvents = sortTimelineEventsNewestFirst(events);
+  const latestPatientReport = selectLatestPatientReport(orderedEvents);
+  const recentPatientReports = selectRecentPatientReports(orderedEvents, {
+    limit: 4,
+    excludeId: latestPatientReport?.id,
+  });
+  const medicationEvents = orderedEvents
     .filter((event) => event.medicationDetails)
     .slice(0, 4);
-  const urduUpdate = events.find((event) => {
-    const language = event.language?.toLowerCase();
-    return language === "ur" || language?.includes("urdu");
-  });
-  const patientUpdateCount = events.filter((event) =>
+  const patientUpdateCount = orderedEvents.filter((event) =>
     ["patient_text", "patient_voice", "medication_update"].includes(event.type),
   ).length;
-  const encounterCount = events.filter((event) =>
+  const encounterCount = orderedEvents.filter((event) =>
     ["ae_encounter", "gp_review", "specialist_review"].includes(event.type),
   ).length;
 
   return (
     <main className="mx-auto max-w-[1320px] px-4 py-5 sm:px-6 lg:px-8">
       <div className="rounded-[1.25rem] border bg-white px-5 py-4 shadow-card sm:px-6">
-        <PatientHeader events={events} patient={patient} />
+        <PatientHeader events={orderedEvents} patient={patient} />
         <div className="flex flex-col gap-3 pt-4 sm:flex-row sm:items-end">
           <div>
             <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[.13em] text-plum-600">
@@ -457,8 +672,9 @@ function ClinicalInvestigation({
               Clinical Investigation
             </h2>
             <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-              Explore the source updates, imported records and evidence Thread
-              used to organise {patient.name}’s appointment summary.
+              Start from what {patient.name} most recently reported, then review
+              earlier updates, imported records and AI-organised context with
+              linked evidence.
             </p>
           </div>
           <Button asChild variant="outline" size="sm" className="sm:ml-auto">
@@ -471,12 +687,53 @@ function ClinicalInvestigation({
 
       <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.48fr)_minmax(20rem,.72fr)]">
         <div className="min-w-0 space-y-5">
+          {latestPatientReport ? (
+            <Card>
+              <CardHeader>
+                <InvestigationSectionHeading
+                  icon={MessageSquareText}
+                  title="Most recent patient report"
+                  subtitle="Occurrence date, original wording and reviewed structured fields"
+                />
+              </CardHeader>
+              <CardContent>
+                <LatestPatientReportCard
+                  event={latestPatientReport}
+                  openEvidence={openEvidence}
+                />
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {recentPatientReports.length ? (
+            <Card>
+              <CardHeader>
+                <InvestigationSectionHeading
+                  icon={History}
+                  title="Recent patient-reported updates"
+                  subtitle="Earlier reports in occurrence order · newest first · no inferred trends"
+                />
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {recentPatientReports.map((report) => (
+                  <LatestPatientReportCard
+                    key={report.id}
+                    event={report}
+                    openEvidence={openEvidence}
+                    featured={false}
+                  />
+                ))}
+              </CardContent>
+            </Card>
+          ) : null}
+
           <Card>
             <CardHeader>
               <InvestigationSectionHeading
                 icon={Search}
                 title="AI-organised observations"
-                subtitle="Select an observation to inspect the linked evidence"
+                subtitle="Thread-organised patterns · not clinically verified · open evidence to inspect sources"
+                action={<VerificationBadge compact />}
               />
             </CardHeader>
             <CardContent>
@@ -486,12 +743,17 @@ function ClinicalInvestigation({
                     key={statement.id}
                     className="flex items-center gap-3 py-3 first:pt-0 last:pb-0"
                   >
-                    <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-plum-50 text-[10px] font-bold text-plum-700">
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-amber-50 text-[10px] font-bold text-amber-800">
                       {statement.evidenceCount}
                     </span>
-                    <span className="flex-1 text-sm leading-5">
-                      {statement.text}
-                    </span>
+                    <div className="min-w-0 flex-1">
+                      <span className="text-sm leading-5">{statement.text}</span>
+                      {statement.uncertainty ? (
+                        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                          {statement.uncertainty}
+                        </p>
+                      ) : null}
+                    </div>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -512,17 +774,17 @@ function ClinicalInvestigation({
             <CardHeader>
               <InvestigationSectionHeading
                 icon={History}
-                title="Longitudinal timeline"
-                subtitle="Patient updates, healthcare encounters and source timestamps"
+                title="Full timeline"
+                subtitle="Patient updates, imported encounters and AI observations · newest first"
               />
             </CardHeader>
             <CardContent>
               <TimelineList
-                events={events}
+                events={orderedEvents}
                 onViewEvidence={(event) =>
                   openEvidence(
                     event.summary,
-                    event.evidenceRefs?.map((item) => item.id) ?? [],
+                    resolveEvidenceIdsForEvent(event),
                   )
                 }
                 onViewEncounter={setEncounterEvent}
@@ -532,60 +794,12 @@ function ClinicalInvestigation({
         </div>
 
         <aside className="space-y-5">
-          {urduUpdate ? (
-            <Card>
-              <CardHeader>
-                <InvestigationSectionHeading
-                  icon={Languages}
-                  title="Patient voice"
-                  subtitle={format(
-                    new Date(urduUpdate.recordedAt),
-                    "d MMM yyyy, HH:mm",
-                  )}
-                />
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4 text-sm leading-6">
-                  <div>
-                    <p className="text-[10px] font-semibold uppercase tracking-[.1em] text-plum-600">
-                      Original · Roman Urdu
-                    </p>
-                    <p className="mt-1.5 italic">“{urduUpdate.originalText}”</p>
-                  </div>
-                  <div className="border-t pt-4">
-                    <p className="text-[10px] font-semibold uppercase tracking-[.1em] text-muted-foreground">
-                      English translation
-                    </p>
-                    <p className="mt-1.5">{urduUpdate.translatedText}</p>
-                  </div>
-                </div>
-                {urduUpdate.evidenceRefs?.length ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="mt-3 px-1 text-plum-700"
-                    onClick={() =>
-                      openEvidence(
-                        urduUpdate.summary,
-                        urduUpdate.evidenceRefs?.map(
-                          (reference) => reference.id,
-                        ) ?? [],
-                      )
-                    }
-                  >
-                    View source evidence <ChevronRight />
-                  </Button>
-                ) : null}
-              </CardContent>
-            </Card>
-          ) : null}
-
           <Card>
             <CardHeader>
               <InvestigationSectionHeading
                 icon={Pill}
                 title="Medication history"
-                subtitle="Reported use, effect and side effects"
+                subtitle="Patient-reported use, effect and side effects"
               />
             </CardHeader>
             <CardContent>
@@ -603,6 +817,19 @@ function ClinicalInvestigation({
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
                       {event.summary}
                     </p>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="mt-1 h-7 px-0 text-plum-700"
+                      onClick={() =>
+                        openEvidence(
+                          event.summary,
+                          resolveEvidenceIdsForEvent(event),
+                        )
+                      }
+                    >
+                      Evidence <ChevronRight />
+                    </Button>
                   </li>
                 ))}
               </ol>
@@ -614,7 +841,7 @@ function ClinicalInvestigation({
               <InvestigationSectionHeading
                 icon={FlaskConical}
                 title="Imported A&E encounter"
-                subtitle="Observations, blood results and source record"
+                subtitle="Imported clinical record · not patient-authored"
               />
             </CardHeader>
             <CardContent>
@@ -622,6 +849,12 @@ function ClinicalInvestigation({
                 <div className="flex items-start gap-3">
                   <FileCheck2 className="mt-0.5 size-4 shrink-0 text-sage-700" />
                   <div>
+                    <div className="mb-2">
+                      <SourceBadge
+                        sourceKind="imported_clinical_record"
+                        compact
+                      />
+                    </div>
                     <p className="text-sm font-semibold">
                       {importedEncounter?.provider ?? "Imported encounter"}
                     </p>
@@ -686,6 +919,11 @@ function ClinicalInvestigation({
                   {format(new Date(observation.recordedAt), "d MMM, HH:mm")}
                 </span>
               </div>
+              <p className="rounded-lg bg-muted px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                Badges separate patient-reported updates, imported clinical
+                records and AI-organised observations. AI findings are not
+                clinically verified.
+              </p>
             </CardContent>
           </Card>
         </aside>
@@ -702,11 +940,22 @@ export function ClinicianDashboard({
   context: ClinicianContext;
 }) {
   const { addEvent } = useDemoData();
-  const [events, setEvents] = React.useState(context.timelineEvents);
+  /** Session-only timeline overlays (e.g. demo import) merged onto server context. */
+  const [sessionEvents, setSessionEvents] = React.useState<TimelineEvent[]>(
+    [],
+  );
   const [evidenceState, setEvidenceState] =
     React.useState<EvidenceState | null>(null);
   const [encounterEvent, setEncounterEvent] =
     React.useState<TimelineEvent | null>(null);
+
+  const events = React.useMemo(() => {
+    const merged = new Map(
+      context.timelineEvents.map((event) => [event.id, event]),
+    );
+    for (const event of sessionEvents) merged.set(event.id, event);
+    return sortTimelineEventsNewestFirst(Array.from(merged.values()));
+  }, [context.timelineEvents, sessionEvents]);
   const [importOpen, setImportOpen] = React.useState(false);
   const [importStep, setImportStep] = React.useState(-1);
   const [importComplete, setImportComplete] = React.useState(false);
@@ -796,12 +1045,10 @@ export function ClinicianDashboard({
 
         if (!alreadyPresent && importedEvent) {
           addEvent(importedEvent);
-          setEvents((current) =>
-            [importedEvent, ...current].filter(
-              (event, index, all) =>
-                all.findIndex((candidate) => candidate.id === event.id) ===
-                index,
-            ),
+          setSessionEvents((current) =>
+            current.some((event) => event.id === importedEvent.id)
+              ? current
+              : [...current, importedEvent],
           );
         }
         const outcome =

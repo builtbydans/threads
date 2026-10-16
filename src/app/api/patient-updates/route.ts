@@ -58,7 +58,9 @@ export async function PUT(request: Request) {
       {
         event,
         saved: true,
+        durable: true,
         reviewIntegrity: "saved_as_reviewed",
+        idempotency: "upsert_by_event_id",
       },
       {
         status: 201,

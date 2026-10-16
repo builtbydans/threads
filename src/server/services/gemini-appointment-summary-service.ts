@@ -2,7 +2,11 @@ import "server-only";
 
 import { seedAppointmentBrief } from "@/data/seed";
 import { AMINA_PATIENT_ID } from "@/lib/constants";
-import { getGeminiClient, getGeminiModel } from "@/server/gemini/client";
+import {
+  getGeminiClient,
+  getGeminiModel,
+  getGeminiThinkingConfig,
+} from "@/server/gemini/client";
 import { appointmentBriefRepository } from "@/server/repositories/appointment-brief-repository";
 import {
   appointmentSummaryJsonSchema,
@@ -29,6 +33,26 @@ Use only the supplied evidence. Clearly attribute patient-reported information a
 
 const unsafeClinicalLanguage =
   /\b(?:i recommend|thread recommends|should (?:start|stop|take|change|increase|decrease)|diagnosis is|likely diagnosis|requires surgery|needs surgery|treatment plan)\b/i;
+
+const safeFailureReason = (error: unknown) => {
+  if (error instanceof SyntaxError) return "malformed_json";
+  if (error instanceof Error) {
+    if (error.name === "ZodError") return "schema_validation_failed";
+    if (error.message.includes("no statements with valid evidence")) {
+      return "evidence_validation_failed";
+    }
+    if (error.message.includes("safety boundary")) return "safety_validation_failed";
+    if (error.message.includes("no summary text")) return "empty_response";
+    if (error.message.startsWith("malformed_response_")) {
+      return error.message;
+    }
+    if (error.name === "TimeoutError" || error.name === "AbortError") {
+      return "timeout";
+    }
+    return `provider_${error.name.toLowerCase()}`;
+  }
+  return "provider_error";
+};
 
 const itemsFor = (brief: AppointmentBrief, key: AppointmentBriefSectionKey) =>
   brief.sections.find((section) => section.key === key)?.items ?? [];
@@ -135,6 +159,23 @@ const contextForPrompt = (context: ClinicalContext) => ({
   evidence: context.evidence,
 });
 
+const parseStructuredResponse = (text: string): unknown => {
+  const trimmed = text.trim();
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    const withoutFence = trimmed
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/, "");
+    const objectStart = withoutFence.indexOf("{");
+    const objectEnd = withoutFence.lastIndexOf("}");
+    if (objectStart < 0 || objectEnd <= objectStart) {
+      throw new SyntaxError("Gemini returned malformed structured output.");
+    }
+    return JSON.parse(withoutFence.slice(objectStart, objectEnd + 1)) as unknown;
+  }
+};
+
 export class GeminiAppointmentSummaryService {
   async generate(patientId: string): Promise<GeneratedAppointmentSummary> {
     if (patientId !== AMINA_PATIENT_ID) {
@@ -183,17 +224,22 @@ export class GeminiAppointmentSummaryService {
         config: {
           systemInstruction: SUMMARY_SYSTEM_INSTRUCTION,
           temperature: 0.1,
-          maxOutputTokens: 2_048,
+          maxOutputTokens: 4_096,
           responseMimeType: "application/json",
           responseJsonSchema: appointmentSummaryJsonSchema,
-          abortSignal: AbortSignal.timeout(20_000),
+          thinkingConfig: getGeminiThinkingConfig(),
+          abortSignal: AbortSignal.timeout(25_000),
         },
       });
       if (!response.text) throw new Error("Gemini returned no summary text.");
-      const summary = validateGeneratedSummary(
-        JSON.parse(response.text) as unknown,
-        context,
-      );
+      let structuredResponse: unknown;
+      try {
+        structuredResponse = parseStructuredResponse(response.text);
+      } catch {
+        const finishReason = response.candidates?.[0]?.finishReason ?? "unknown";
+        throw new Error(`malformed_response_${finishReason.toLowerCase()}`);
+      }
+      const summary = validateGeneratedSummary(structuredResponse, context);
       const generatedAt = new Date().toISOString();
       console.info("[Thread Gemini summary]", {
         patientId,
@@ -203,8 +249,9 @@ export class GeminiAppointmentSummaryService {
       });
       return { summary, mode: "gemini", generatedAt, model };
     } catch (error) {
-      console.warn("[Thread Gemini summary] Falling back", {
-        reason: error instanceof Error ? error.name : "provider_error",
+      const reason = safeFailureReason(error);
+      console.warn(`[Thread Gemini summary] Falling back: ${reason}`, {
+        reason,
         patientId,
       });
       return fallback("Gemini is unavailable; showing the prepared summary.");

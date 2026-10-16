@@ -48,6 +48,8 @@ export interface EvidenceReference {
   organisation?: string;
   audioUrl?: string;
   uncertainty?: string;
+  /** Optional provenance / structured-review payload from evidence_records.metadata. */
+  metadata?: Record<string, unknown>;
 }
 
 export type ContextAnswerConfidence =

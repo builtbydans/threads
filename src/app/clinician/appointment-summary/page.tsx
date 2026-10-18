@@ -1,6 +1,9 @@
 import { ClinicianDashboard } from "@/components/clinician/clinician-dashboard";
+import { ClinicianDataError } from "@/components/clinician/clinician-data-error";
 import { AMINA_PATIENT_ID } from "@/lib/constants";
+import { RepositoryError } from "@/server/repositories/repository-support";
 import { clinicianContextService } from "@/server/services/clinician-context-service";
+import type { ClinicianContext } from "@/server/types/domain";
 import type { Metadata } from "next";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +14,29 @@ export const metadata: Metadata = {
   description: "Amina Khan’s concise, evidence-backed pre-appointment workspace.",
 };
 
+async function loadContext(): Promise<
+  | { ok: true; context: ClinicianContext }
+  | { ok: false; message: string }
+> {
+  try {
+    const context = await clinicianContextService.getContext(AMINA_PATIENT_ID);
+    return { ok: true, context };
+  } catch (error) {
+    console.error("[Thread clinician appointment summary]", error);
+    return {
+      ok: false,
+      message:
+        error instanceof RepositoryError
+          ? "Thread could not load this appointment summary from the configured database. Demonstration seed data was not substituted."
+          : "Thread could not load this appointment summary. Please try again.",
+    };
+  }
+}
+
 export default async function AppointmentSummaryPage() {
-  const context = await clinicianContextService.getContext(AMINA_PATIENT_ID);
-  return <ClinicianDashboard mode="summary" context={context} />;
+  const result = await loadContext();
+  if (!result.ok) {
+    return <ClinicianDataError message={result.message} />;
+  }
+  return <ClinicianDashboard mode="summary" context={result.context} />;
 }

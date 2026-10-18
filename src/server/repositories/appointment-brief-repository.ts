@@ -17,10 +17,10 @@ export class AppointmentBriefRepository {
     return withRepositoryFallback({
       scope: "AppointmentBriefRepository.findLatestByPatient",
       remote: async () => {
-        throw new RepositoryError(
-          "AppointmentBriefRepository.findLatestByPatient",
-          "The authoritative live schema has no public.appointment_briefs table.",
-        );
+        // Live schema has no appointment_briefs table; return null so callers
+        // can use an explicit demo brief without treating a thrown error as a
+        // failed database read that should surface as DATA_SOURCE_UNAVAILABLE.
+        return null;
       },
       fallback: () => {
         const briefs = fallbackStore.appointmentBriefs
@@ -47,7 +47,7 @@ export class AppointmentBriefRepository {
       remote: async () => {
         throw new RepositoryError(
           "AppointmentBriefRepository.save",
-          "The authoritative live schema has no public.appointment_briefs table.",
+          "The live schema has no public.appointment_briefs table; demonstration briefs are in-memory only.",
         );
       },
       fallback: () => {

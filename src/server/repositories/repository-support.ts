@@ -3,6 +3,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getSupabase, getSupabaseAdmin } from "@/lib/supabase";
+import { executeWithRepositoryFallback } from "@/server/repositories/repository-fallback";
 import type { Database } from "@/types/database.types";
 
 const loggedWarnings = new Set<string>();
@@ -36,9 +37,9 @@ export const requireSuccessfulQuery = (
 };
 
 /**
- * Uses seeded data when credentials are absent. A remote failure falls back in
- * development so the demo remains usable, while production surfaces the error
- * rather than quietly replacing a real patient's data with a synthetic record.
+ * Uses seeded data only when Supabase credentials are absent.
+ * When Supabase is configured, remote failures propagate — seed data is never
+ * substituted for a failed live request.
  */
 export async function withRepositoryFallback<T>(input: {
   scope: string;
@@ -46,21 +47,15 @@ export async function withRepositoryFallback<T>(input: {
   fallback: () => Promise<T> | T;
 }): Promise<T> {
   const supabase = getSupabaseAdmin() ?? getSupabase();
-  if (!supabase) {
-    fallbackVersion += 1;
-    warnOnce(input.scope, "Supabase is not configured; using seeded fallback.");
-    return input.fallback();
-  }
 
-  try {
-    return await input.remote(supabase);
-  } catch (error) {
-    fallbackVersion += 1;
-    const message = error instanceof Error ? error.message : "unknown remote error";
-    warnOnce(
-      input.scope,
-      `Supabase unavailable (${message}); using seeded fallback.`,
-    );
-    return input.fallback();
-  }
+  return executeWithRepositoryFallback({
+    scope: input.scope,
+    client: supabase,
+    remote: (client) => input.remote(client as SupabaseClient<Database>),
+    fallback: input.fallback,
+    onDemoFallback: (scope, reason) => {
+      fallbackVersion += 1;
+      warnOnce(scope, reason);
+    },
+  });
 }

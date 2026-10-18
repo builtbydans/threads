@@ -6,11 +6,14 @@ import {
   seedEvidenceReferences,
   seedThreadObservation,
 } from "@/data/seed";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { getSupabase, getSupabaseAdmin } from "@/lib/supabase";
 import { appointmentBriefRepository } from "@/server/repositories/appointment-brief-repository";
 import { importedEncounterRepository } from "@/server/repositories/imported-encounter-repository";
 import { patientRepository } from "@/server/repositories/patient-repository";
-import { getRepositoryFallbackVersion } from "@/server/repositories/repository-support";
+import {
+  getRepositoryFallbackVersion,
+  RepositoryError,
+} from "@/server/repositories/repository-support";
 import { timelineRepository } from "@/server/repositories/timeline-repository";
 import type {
   ClinicianContext,
@@ -91,86 +94,107 @@ const observationFromTimeline = (
 export class ClinicianContextService {
   async getContext(patientId: string): Promise<ClinicianContext> {
     const fallbackVersion = getRepositoryFallbackVersion();
-    const patient = await patientRepository.findById(patientId);
-    const resolvedPatient = patient ??
-      (patientId === demoPatient.id ? structuredClone(demoPatient) : null);
-    if (!resolvedPatient) throw new Error("Amina's patient record was not found.");
+    const liveConfigured = Boolean(getSupabaseAdmin() ?? getSupabase());
 
-    const [timelineEvents, appointmentBrief, importedEncounters] =
-      await Promise.all([
-        timelineRepository.listByPatient(patientId),
-        appointmentBriefRepository.findLatestByPatient(patientId),
-        importedEncounterRepository.listByPatient(patientId),
-      ]);
-    const resolvedBrief = appointmentBrief ?? structuredClone(seedAppointmentBrief);
-    const patientWithAppointment = {
-      ...resolvedPatient,
-      nextAppointment: resolvedBrief.appointment,
-    };
-    const observation =
-      observationFromTimeline(timelineEvents) ?? structuredClone(seedThreadObservation);
-    const timelineEvidence = timelineEvents.flatMap((event) => {
-      if (event.evidenceRefs?.length) return event.evidenceRefs;
-      if (event.type === "ai_observation") return [];
-      return [
-        {
-          id: event.id,
-          eventId: event.id,
-          sourceKind: event.sourceKind,
-          label: event.title,
-          excerpt: event.translatedText ?? event.summary,
-          ...(event.originalText
-            ? { originalExcerpt: event.originalText }
-            : {}),
-          ...(event.translatedText
-            ? { translatedExcerpt: event.translatedText }
-            : {}),
-          recordedAt: event.recordedAt,
-          ...(event.language ? { language: event.language } : {}),
-          ...(event.organisation
-            ? { organisation: event.organisation }
-            : {}),
-        },
-      ];
-    });
-    const evidence = Array.from(
-      new Map(
-        [
-          ...timelineEvidence,
-          ...seedEvidenceReferences.filter((reference) =>
-            resolvedBrief.evidenceIds.includes(reference.id),
-          ),
-        ]
-          .map((reference) => [reference.id, reference]),
-      ).values(),
-    );
-    const dataSource =
-      getSupabaseAdmin() &&
-      getRepositoryFallbackVersion() === fallbackVersion &&
-      patient &&
-      appointmentBrief
-        ? "supabase"
-        : "fallback";
+    try {
+      const patient = await patientRepository.findById(patientId);
+      // Only use the hardcoded demo patient when Supabase is not configured.
+      const resolvedPatient = patient ??
+        (!liveConfigured && patientId === demoPatient.id
+          ? structuredClone(demoPatient)
+          : null);
+      if (!resolvedPatient) {
+        throw new RepositoryError(
+          "ClinicianContextService.getContext",
+          `Patient ${patientId} was not found.`,
+        );
+      }
 
-    console.info("[Thread clinician data]", {
-      patientId,
-      patientFound: Boolean(patient),
-      timelineCount: timelineEvents.length,
-      briefFound: Boolean(appointmentBrief),
-      encounterCount: importedEncounters.length,
-      evidenceCount: evidence.length,
-      source: dataSource,
-    });
+      const [timelineEvents, appointmentBrief, importedEncounters] =
+        await Promise.all([
+          timelineRepository.listByPatient(patientId),
+          appointmentBriefRepository.findLatestByPatient(patientId),
+          importedEncounterRepository.listByPatient(patientId),
+        ]);
+      // Appointment briefs are not stored in the live schema; seed is an
+      // explicit demo overlay and must not be confused with a silent DB fallback.
+      const resolvedBrief =
+        appointmentBrief ?? structuredClone(seedAppointmentBrief);
+      const patientWithAppointment = {
+        ...resolvedPatient,
+        nextAppointment: resolvedBrief.appointment,
+      };
+      const observation =
+        observationFromTimeline(timelineEvents) ??
+        structuredClone(seedThreadObservation);
+      const timelineEvidence = timelineEvents.flatMap((event) => {
+        if (event.evidenceRefs?.length) return event.evidenceRefs;
+        if (event.type === "ai_observation") return [];
+        return [
+          {
+            id: event.id,
+            eventId: event.id,
+            sourceKind: event.sourceKind,
+            label: event.title,
+            excerpt: event.translatedText ?? event.summary,
+            ...(event.originalText
+              ? { originalExcerpt: event.originalText }
+              : {}),
+            ...(event.translatedText
+              ? { translatedExcerpt: event.translatedText }
+              : {}),
+            recordedAt: event.recordedAt,
+            ...(event.language ? { language: event.language } : {}),
+            ...(event.organisation
+              ? { organisation: event.organisation }
+              : {}),
+          },
+        ];
+      });
+      const evidence = Array.from(
+        new Map(
+          [
+            ...timelineEvidence,
+            ...seedEvidenceReferences.filter((reference) =>
+              resolvedBrief.evidenceIds.includes(reference.id),
+            ),
+          ].map((reference) => [reference.id, reference]),
+        ).values(),
+      );
+      const usedDemoFallback =
+        getRepositoryFallbackVersion() !== fallbackVersion;
+      const dataSource =
+        liveConfigured && !usedDemoFallback && patient
+          ? "supabase"
+          : "fallback";
 
-    return {
-      patient: patientWithAppointment,
-      timelineEvents,
-      evidence,
-      appointmentBrief: resolvedBrief,
-      importedEncounters,
-      observation,
-      dataSource,
-    };
+      console.info("[Thread clinician data]", {
+        patientId,
+        patientFound: Boolean(patient),
+        timelineCount: timelineEvents.length,
+        briefFound: Boolean(appointmentBrief),
+        encounterCount: importedEncounters.length,
+        evidenceCount: evidence.length,
+        source: dataSource,
+      });
+
+      return {
+        patient: patientWithAppointment,
+        timelineEvents,
+        evidence,
+        appointmentBrief: resolvedBrief,
+        importedEncounters,
+        observation,
+        dataSource,
+      };
+    } catch (error) {
+      if (error instanceof RepositoryError) throw error;
+      console.error("[Thread clinician data] Unexpected error", error);
+      throw new RepositoryError(
+        "ClinicianContextService.getContext",
+        error instanceof Error ? error.message : "Unexpected clinician data error.",
+      );
+    }
   }
 }
 

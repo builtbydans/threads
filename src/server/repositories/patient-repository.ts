@@ -5,7 +5,6 @@ import type { Patient } from "@/server/types/domain";
 
 import { mapPatient } from "@/server/repositories/mappers";
 import {
-  RepositoryError,
   requireSuccessfulQuery,
   withRepositoryFallback,
 } from "@/server/repositories/repository-support";
@@ -24,12 +23,7 @@ export class PatientRepository {
           .maybeSingle();
 
         requireSuccessfulQuery("PatientRepository.findById", error);
-        if (!data) {
-          throw new RepositoryError(
-            "PatientRepository",
-            `Patient ${patientId} was not found.`,
-          );
-        }
+        if (!data) return null;
         return mapPatient(data);
       },
       fallback: () =>

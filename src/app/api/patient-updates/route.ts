@@ -1,3 +1,7 @@
+import {
+  isSupabaseAdminConfigured,
+  isSupabaseConfigured,
+} from "@/lib/env";
 import { apiSuccess, handleRouteError } from "@/server/http/api-response";
 import {
   patientUpdateInputSchema,
@@ -16,9 +20,13 @@ export async function GET(request: Request) {
       patientId: url.searchParams.get("patientId") ?? undefined,
     });
     const events = await timelineService.getTimeline(input.patientId);
+    const dataSource =
+      isSupabaseAdminConfigured || isSupabaseConfigured
+        ? "supabase"
+        : "fallback";
 
     return apiSuccess(
-      { events, count: events.length },
+      { events, count: events.length, dataSource },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {

@@ -3,6 +3,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 
+import { RepositoryError } from "@/server/repositories/repository-support";
 import { TranscriptionProviderUnavailableError } from "@/server/services/transcription-service";
 import { AiProviderError } from "@/server/services/ai-extraction-service";
 import { DomainServiceError } from "@/server/services/service-error";
@@ -60,6 +61,15 @@ export const handleRouteError = (error: unknown) => {
 
   if (error instanceof DomainServiceError) {
     return apiError(error.status, error.code, error.message);
+  }
+
+  if (error instanceof RepositoryError) {
+    console.error("[Thread API] Repository error", error.scope, error.message);
+    return apiError(
+      503,
+      "DATA_SOURCE_UNAVAILABLE",
+      "Thread could not reach the health record store. Please try again.",
+    );
   }
 
   if (error instanceof AiProviderError) {

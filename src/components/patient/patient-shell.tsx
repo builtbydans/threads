@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, CalendarDays, CirclePlus, Clock3, Home, Stethoscope } from "lucide-react";
+import { AlertTriangle, Bell, CalendarDays, CirclePlus, Clock3, Home, Stethoscope } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { useDemoData } from "@/components/shared/demo-data-provider";
 import { ThreadLogo } from "@/components/shared/thread-logo";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -21,6 +22,7 @@ function isCurrent(pathname: string, item: (typeof navItems)[number]) {
 
 export function PatientShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const { isHydrated, liveDataStatus, liveDataMessage } = useDemoData();
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -54,6 +56,25 @@ export function PatientShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
         </header>
+
+        {isHydrated && liveDataStatus !== "live" && liveDataMessage ? (
+          <div
+            role="status"
+            className={cn(
+              "border-b px-5 py-2.5 text-center text-xs leading-5 sm:px-7",
+              liveDataStatus === "unavailable"
+                ? "border-amber-200 bg-amber-50 text-amber-950"
+                : "border-plum-100 bg-plum-50/80 text-plum-900",
+            )}
+          >
+            <span className="inline-flex items-center justify-center gap-2">
+              {liveDataStatus === "unavailable" ? (
+                <AlertTriangle className="size-3.5 shrink-0" />
+              ) : null}
+              {liveDataMessage}
+            </span>
+          </div>
+        ) : null}
 
         {children}
 
